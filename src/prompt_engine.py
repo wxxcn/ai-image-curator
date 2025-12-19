@@ -51,6 +51,16 @@ class PromptEngine:
 
     def get_feedback_adjustment_prompt(self, history, feedback):
         """
-        基于历史记录和用户反馈调整 Prompt
+        基于历史记录和用户反馈调整 Prompt (强制 JSON 输出)
         """
-        return f"基于此前的生图历史: {history}。用户反馈: {feedback}。请生成一个新的、经过优化的 Qwen-Image **中文提示词**。"
+        return (
+            f"基于此前的生图历史: {history}。\n"
+            f"用户最新反馈: {feedback}。\n\n"
+            "请分析用户的修改意图，并生成一个新的、经过优化的 Qwen-Image **中文提示词**。\n"
+            "请严格按照以下 JSON 格式输出思维链：\n"
+            "{\n"
+            '    "analysis": "分析用户希望修改哪里（例如：光影、构图、主体动作）...",\n'
+            '    "critique": "思考如何修改 Prompt 才能准确实现这一改变，同时保持原有的高质量...",\n'
+            '    "final_prompt": "修改后的最终中文提示词"\n'
+            "}"
+        )
