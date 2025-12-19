@@ -1,48 +1,114 @@
 import streamlit as st
 import os
+import json
 from dotenv import load_dotenv
 from src.llm_client import LLMClient
 from src.image_gen import ImageGenerator
 from src.prompt_engine import PromptEngine
+from src.history_manager import HistoryManager
 
 load_dotenv()
 
+CONFIG_FILE = ".user_config.json"
+
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_config(config):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(config, f)
+
 st.set_page_config(page_title="AI Image Curator (Qwen-Image)", page_icon="🎨", layout="wide")
 
+# --- Initialize Config ---
+user_config = load_config()
+saved_api_key = user_config.get("DASHSCOPE_API_KEY", os.getenv("DASHSCOPE_API_KEY", ""))
+
+# --- Initialize Managers ---
+history_manager = HistoryManager()
+
 # --- Initialize Session State ---
-if "messages" not in st.session_state:
+if "api_key" not in st.session_state:
+    st.session_state.api_key = saved_api_key
+
+if "current_session_id" not in st.session_state:
+    st.session_state.current_session_id = history_manager.create_new_session()
     st.session_state.messages = []
+    st.session_state.current_title = "New Chat"
+
 if "last_final_prompt" not in st.session_state:
     st.session_state.last_final_prompt = ""
 
 # --- Sidebar ---
 with st.sidebar:
     st.title("Settings ⚙️")
-    st.markdown("### Alibaba DashScope (Qwen Family)")
-    api_key = st.text_input("DashScope API Key", type="password", value=os.getenv("DASHSCOPE_API_KEY", ""))
-    st.caption("Using Qwen-Max for Logic and Qwen-Image-Plus for Art.")
+    
+    # 1. New Chat Button
+    if st.button("➕ New Chat", use_container_width=True):
+        st.session_state.current_session_id = history_manager.create_new_session()
+        st.session_state.messages = []
+        st.session_state.current_title = "New Chat"
+        st.session_state.last_final_prompt = ""
+        st.rerun()
+
+    st.divider()
+
+    # 2. History List
+    st.subheader("📜 History")
+    sessions = history_manager.get_all_sessions()
+    
+    for sess in sessions:
+        # 使用唯一 key 防止冲突
+        if st.button(f"{sess['title']}", key=sess['id'], use_container_width=True):
+            st.session_state.current_session_id = sess['id']
+            msgs, title = history_manager.load_session(sess['id'])
+            st.session_state.messages = msgs
+            st.session_state.current_title = title
+            # 尝试恢复 last_final_prompt (从最后一条 AI 消息中提取，或者重置)
+            st.session_state.last_final_prompt = "" 
+            # 简单的恢复逻辑：如果最后一条是 assistant 且有 prompt，可以恢复（这里简化处理）
+            st.rerun()
+
+    st.divider()
+
+    st.markdown("### Configuration")
+    input_api_key = st.text_input("DashScope API Key", type="password", value=st.session_state.api_key)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("💾 Save Key"):
+            st.session_state.api_key = input_api_key
+            save_config({"DASHSCOPE_API_KEY": input_api_key})
+            st.success("API Key Saved!")
+            st.rerun()
+    with col2:
+        if st.button("🗑️ Clear Key"):
+            st.session_state.api_key = ""
+            save_config({"DASHSCOPE_API_KEY": ""})
+            st.warning("API Key Cleared")
+            st.rerun()
+            
+    st.caption("Key is saved locally in `.user_config.json`.")
     
     platform = st.selectbox(
         "Target Social Platform 📱",
         options=list(PromptEngine.PLATFORM_TEMPLATES.keys())
     )
-    st.info(f"**Current Style Guide:**\n{PromptEngine.PLATFORM_TEMPLATES[platform]}")
-    
-    if st.button("Clear Chat History"):
-        st.session_state.messages = []
-        st.session_state.last_final_prompt = ""
-        st.rerun()
+    st.info(f"**Style Guide:**\n{PromptEngine.PLATFORM_TEMPLATES[platform]}")
 
 # --- Main UI ---
 st.title("🎨 AI Image Curator (Qwen-Image)")
-st.caption("Powered by Alibaba Qwen-Max & Qwen-Image-Plus. Advanced text rendering and aesthetic quality.")
+# st.caption(f"Current Session: {st.session_state.current_title}")
 
 # Initialize Clients
-if api_key:
-    llm_client = LLMClient(api_key=api_key)
-    image_gen = ImageGenerator(api_key=api_key)
+if st.session_state.api_key:
+    llm_client = LLMClient(api_key=st.session_state.api_key)
+    image_gen = ImageGenerator(api_key=st.session_state.api_key)
 else:
-    st.warning("Please enter your DashScope API Key in the sidebar.")
+    st.warning("Please enter and save your DashScope API Key in the sidebar.")
     st.stop()
 
 # Display chat messages
@@ -56,9 +122,7 @@ for message in st.session_state.messages:
             with st.expander("View Prompt Iteration Details"):
                 st.json(message["iteration_details"])
 
-# Platform to Size Mapping (Qwen-Image specific sizes)
-# Supported: 1024*1024, 1280*720, 720*1280 (Standard) OR 1328*1328, 928*1664 etc (Plus)
-# To be safe for Qwen-Image-Plus, we use the high-res specific sizes found in logs:
+# Platform to Size Mapping
 PLATFORM_SIZES = {
     "Default": "1328*1328",          # 1:1 Square
     "Xiaohongshu (小红书)": "928*1664", # 9:16 Vertical
@@ -67,33 +131,39 @@ PLATFORM_SIZES = {
 }
 
 # Chat Input
-if prompt := st.chat_input("What would you like to create? (e.g., '一只喝咖啡的可爱猫咪')"):
-    # Check if it's a new request or feedback
+if prompt := st.chat_input("What would you like to create?"):
+    # Determine Context
     is_feedback = len(st.session_state.messages) > 0 and st.session_state.last_final_prompt != ""
+    target_size = PLATFORM_SIZES.get(platform, "1328*1328")
     
-    target_size = PLATFORM_SIZES.get(platform, "1024*1024")
-    
+    # 1. Add User Message
     with st.chat_message("user"):
         st.markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
+    
+    # Save immediately to update title if it's the first message
+    history_manager.save_session(
+        st.session_state.current_session_id, 
+        st.session_state.messages,
+        title=st.session_state.current_title if st.session_state.current_title != "New Chat" else None
+    )
 
+    # 2. Generate Response
     with st.chat_message("assistant"):
         with st.status("Thinking & Optimizing Prompt...", expanded=True) as status:
             if not is_feedback:
-                # Feature 2: Self-iteration
-                st.write("Analyzing intent and applying platform styles...")
+                # --- New Generation ---
+                st.write("Analyzing intent...")
                 iteration_result = llm_client.optimize_prompt(prompt, platform)
                 final_prompt = iteration_result["final_prompt"]
                 st.session_state.last_final_prompt = final_prompt
                 
-                st.write("Critique & Refinement complete.")
                 status.update(label="Prompt Optimized!", state="complete", expanded=False)
                 
-                st.markdown(f"**Final Optimized Prompt (Chinese):**\n`{final_prompt}`")
-                st.caption(f"Target Size: `{target_size}`")
+                st.markdown(f"**Final Prompt:**\n`{final_prompt}`")
+                st.caption(f"Size: `{target_size}`")
                 
-                # Feature 1: Image Generation
-                st.write(f"Generating image with Qwen-Image ({target_size})...")
+                st.write("Generating image...")
                 image_url = image_gen.generate_image(final_prompt, size=target_size)
                 
                 if image_url:
@@ -107,12 +177,12 @@ if prompt := st.chat_input("What would you like to create? (e.g., '一只喝咖�
                 else:
                     st.error("Failed to generate image.")
             else:
-                # Feature 1: Based on feedback
-                st.write("Adjusting previous prompt based on feedback...")
+                # --- Feedback / Modification ---
+                st.write("Adjusting prompt based on feedback...")
                 new_prompt = llm_client.adjust_prompt_with_feedback(prompt, st.session_state.last_final_prompt)
                 st.session_state.last_final_prompt = new_prompt
                 
-                st.write(f"Generating adjusted image with Wanxiang ({target_size})...")
+                st.write("Generating new image...")
                 image_url = image_gen.generate_image(new_prompt, size=target_size)
                 
                 if image_url:
@@ -125,3 +195,19 @@ if prompt := st.chat_input("What would you like to create? (e.g., '一只喝咖�
                     })
                 else:
                     st.error("Failed to generate image.")
+    
+    # 3. Save History after generation
+    # Update title dynamically if it's still generic
+    if st.session_state.current_title == "New Chat":
+        # Refresh session to get the auto-generated title from the manager
+        # Or just let the manager handle it. 
+        # Here we manually set it for UI consistency
+        st.session_state.current_title = prompt[:20] + "..."
+        
+    history_manager.save_session(
+        st.session_state.current_session_id, 
+        st.session_state.messages,
+        title=st.session_state.current_title
+    )
+    # Rerun to update the sidebar history list title
+    st.rerun()

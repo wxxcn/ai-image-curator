@@ -13,6 +13,7 @@ dist/
 
 # Environment Variables (CRITICAL)
 .env
+.user_config.json
 
 # MacOS
 .DS_Store
