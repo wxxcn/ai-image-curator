@@ -177,12 +177,15 @@ if prompt := st.chat_input("What would you like to create?"):
                 else:
                     st.error("Failed to generate image.")
             else:
-                # --- Feedback / Modification ---
-                st.write("Adjusting prompt based on feedback...")
-                new_prompt = llm_client.adjust_prompt_with_feedback(prompt, st.session_state.last_final_prompt)
+                # --- Feedback / Modification with Full Context ---
+                st.write("Analyzing full conversation context for adjustment...")
+                new_prompt = llm_client.adjust_prompt_with_context(
+                    st.session_state.messages, 
+                    st.session_state.last_final_prompt
+                )
                 st.session_state.last_final_prompt = new_prompt
                 
-                st.write("Generating new image...")
+                st.write(f"Generating new image with Qwen-Image ({target_size})...")
                 image_url = image_gen.generate_image(new_prompt, size=target_size)
                 
                 if image_url:
